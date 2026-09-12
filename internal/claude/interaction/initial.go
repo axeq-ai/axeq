@@ -20,7 +20,7 @@ var initialPrompt string
 // browser/page — the caller is responsible for capturing screenshots and
 // applying actions. attachments names user-attached files already copied into
 // screenshotsDir/attachments; they are announced in this initial prompt only.
-func Initial(screenshotsDir, userPrompt, model, systemPromptFile string, preset playwright.Preset, screenshotPath, domPath string, focused *playwright.FocusedElement, tabs []playwright.Tab, attachments []string) (convoId string, response InteractionResponse, err error) {
+func Initial(screenshotsDir, userPrompt, systemPromptFile string, preset playwright.Preset, screenshotPath, domPath string, focused *playwright.FocusedElement, tabs []playwright.Tab, attachments []string) (convoId string, response InteractionResponse, err error) {
 	schema := presetSchema(preset)
 
 	res, err := prompt.Render(initialPrompt, map[string]prompt.Param{
@@ -41,7 +41,7 @@ func Initial(screenshotsDir, userPrompt, model, systemPromptFile string, preset 
 		}
 	}
 
-	req := request("interaction-initial", screenshotsDir, res.LLM, model, schema, systemPromptFile, "")
+	req := request("interaction-initial", screenshotsDir, res.LLM, schema, systemPromptFile, "")
 
 	resp, result, err := aclio.RunStructured[InteractionResponse](req)
 	if err != nil {

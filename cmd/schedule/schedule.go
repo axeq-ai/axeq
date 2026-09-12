@@ -51,7 +51,6 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 		{Name: "url", MinimumCount: 0, MaximumCount: 100, Required: false},
 		{Name: "prompt", MinimumCount: 1, MaximumCount: 1, Required: false, MutuallyExclusiveRequired: []string{"prompt-path"}},
 		{Name: "prompt-path", MinimumCount: 1, MaximumCount: 1, Required: false, MutuallyExclusiveRequired: []string{"prompt"}},
-		{Name: "model", MinimumCount: 1, MaximumCount: 1},
 		{Name: "preset", MinimumCount: 1, MaximumCount: 1},
 		{Name: "driver", MinimumCount: 1, MaximumCount: 1},
 		{Name: "extension-port", MinimumCount: 1, MaximumCount: 1},
@@ -75,10 +74,6 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 			fatalf("invalid --url %q (expected an absolute URL like https://example.com)", raw)
 		}
 	}
-
-	// Model for the claude CLI. The value itself is not validated here — it is
-	// passed through, and the CLI rejects models it doesn't know.
-	model := flagValue(cleanFlags, "model", "opus")
 
 	// Preset.
 	preset := flagValue(cleanFlags, "preset", "default")
@@ -130,7 +125,6 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 	_, noVideo := cleanFlags["no-video"]
 
 	fmt.Println(urls)
-	fmt.Println(model)
 	fmt.Println(preset)
 	fmt.Println(viewport)
 	fmt.Println(headed)
@@ -388,7 +382,7 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 		panic(err)
 	}
 	rec.Pause()
-	convoId, resp, err := interaction.Initial(agentDir, userPrompt, model, systemPromptFile, pset, shotPath, domPath, focused, be.tabs(), attachmentNames)
+	convoId, resp, err := interaction.Initial(agentDir, userPrompt, systemPromptFile, pset, shotPath, domPath, focused, be.tabs(), attachmentNames)
 	rec.Resume()
 	if err != nil {
 		if errors.Is(err, aclio.ErrInterrupted) {
@@ -415,7 +409,7 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 		}
 
 		rec.Pause()
-		resp, err = interaction.Subsequent(convoId, agentDir, performed, model, systemPromptFile, pset, shotPath, domPath, focused, be.tabs())
+		resp, err = interaction.Subsequent(convoId, agentDir, performed, systemPromptFile, pset, shotPath, domPath, focused, be.tabs())
 		rec.Resume()
 		if err != nil {
 			if errors.Is(err, aclio.ErrInterrupted) {

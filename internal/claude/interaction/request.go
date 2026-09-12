@@ -8,12 +8,12 @@ import (
 // request assembles the claude call shared by Initial and Subsequent: the
 // allow-listed tools, the optional system prompt file, and per-call debug
 // files dumped into the debug dir.
-func request(name, dir, promptText, model, schema, systemPromptFile, resumeID string) aclio.Request {
+func request(name, dir, promptText, schema, systemPromptFile, resumeID string) aclio.Request {
 	return aclio.Request{
 		Provider:   aclio.Claude,
 		Dir:        dir,
 		Prompt:     promptText,
-		Model:      model,
+		Model:      "sonnet",
 		JSONSchema: schema,
 		ResumeID:   resumeID,
 		Name:       name,
