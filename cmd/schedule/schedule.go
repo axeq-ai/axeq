@@ -1,17 +1,16 @@
 package schedule
 
 import (
+	"axeq/internal/app"
 	"axeq/internal/args"
 	"axeq/internal/claude/audit"
-	"axeq/internal/extension"
+	"axeq/internal/config"
 	browser "axeq/internal/playwright"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,11 +20,27 @@ import (
 // framesFPS is the capture and playback frame rate for the recordings.
 const framesFPS = 15
 
+// The browser the audit drives: headless Chromium at a fixed desktop
+// viewport, with a fresh profile per run.
+const (
+	viewportWidth  = 1440
+	viewportHeight = 900
+)
+
+// Budget defaults, used when the config's schedule section leaves them unset,
+// and the bounds a configured value must fall within. Every turn is one
+// claude call, so these bound the run's cost and duration.
+const (
+	defaultMaxScenarios     = 10
+	defaultMaxExploreTurns  = 30
+	defaultMaxScenarioTurns = 40
+	maxMaxScenarios         = 50
+	maxTurns                = 200
+)
+
 // backend is the browser-automation surface the audit drives, filled with
-// either the playwright package's functions (its own Chromium) or the
-// extension package's (the user's normal Chrome via the bridge extension).
-// Both operate on the same action and state types, so the agents' turns are
-// identical either way.
+// the playwright package's functions. It stays a struct of functions so the
+// audit loop never calls the driver package directly.
 type backend struct {
 	openInitialTabs func(urls []string) error
 	waitForLoad     func() error
@@ -38,19 +53,25 @@ type backend struct {
 // The schedule command is a two-agent accessibility audit of a site:
 //
 //  1. An explorer agent — sighted, with the full action set and the
-//     screenshot + DOM each turn — roams the site from the given URL(s) and
-//     returns a JSON list of scenarios: user journeys written for someone who
-//     cannot see the page.
+//     screenshot + DOM each turn — roams the site from the configured URL(s)
+//     and returns a JSON list of scenarios: user journeys written for someone
+//     who cannot see the page.
 //  2. For each scenario a fresh auditor agent — a screen-reader persona that
 //     is keyboard-only and perceives nothing but the focused element — is
 //     placed on the scenario's start page and told to perform its steps. It
 //     reports every hindrance it meets; the orchestrator snapshots the page
 //     as evidence each time and records the attempt on video.
 //
-// Everything lands under outputs/{run}: files/scenarios.json, files/audit.json
-// and files/audit.md (the report), screenshots/ (evidence) and recordings/.
+// Its one flag is --output-dir, where the results go. Everything else comes
+// from the repository's .axeqrc.json in the CWD (the repository root): how to
+// bring the application up, the URLs to audit, and the budgets. The prompts
+// are this repository's.
+//
+// Everything lands under the output dir: files/scenarios.json,
+// files/audit.json and files/audit.md (the report), screenshots/ (evidence)
+// and recordings/.
 func Run(argsReceived []string, flagsReceived map[string][]string) {
-	// run's deferred cleanup (browser/extension teardown) must fire before the
+	// run's deferred cleanup (browser and app teardown) must fire before the
 	// process exits, and os.Exit skips defers — so the exit happens out here,
 	// after run has returned.
 	if code := run(argsReceived, flagsReceived); code != 0 {
@@ -59,157 +80,90 @@ func Run(argsReceived []string, flagsReceived map[string][]string) {
 }
 
 func run(argsReceived []string, flagsReceived map[string][]string) int {
-	argsRequested := []args.ArgRequested{}
+	// No positional args; the only flag is the required --output-dir. Anything
+	// else given is a usage error.
 	flagsRequested := []args.FlagRequested{
-		{Name: "url", MinimumCount: 1, MaximumCount: 100, Required: true},
-		{Name: "prompt", MinimumCount: 1, MaximumCount: 1, MutuallyExclusive: []string{"prompt-path"}},
-		{Name: "prompt-path", MinimumCount: 1, MaximumCount: 1, MutuallyExclusive: []string{"prompt"}},
-		{Name: "scenarios-path", MinimumCount: 1, MaximumCount: 1},
-		{Name: "max-scenarios", MinimumCount: 1, MaximumCount: 1},
-		{Name: "max-explore-turns", MinimumCount: 1, MaximumCount: 1},
-		{Name: "max-scenario-turns", MinimumCount: 1, MaximumCount: 1},
-		{Name: "driver", MinimumCount: 1, MaximumCount: 1},
-		{Name: "extension-port", MinimumCount: 1, MaximumCount: 1},
-		{Name: "system-prompt-file", MinimumCount: 1, MaximumCount: 1},
-		{Name: "user-data-dir", MinimumCount: 1, MaximumCount: 1},
-		{Name: "viewport", MinimumCount: 1, MaximumCount: 1},
-		{Name: "headed", MinimumCount: 0, MaximumCount: 0},
-		{Name: "no-video", MinimumCount: 0, MaximumCount: 0},
+		{Name: "output-dir", MinimumCount: 1, MaximumCount: 1, Required: true},
+	}
+	_, cleanFlags := args.ValidateArgs("schedule", argsReceived, flagsReceived, nil, flagsRequested)
+
+	// Where the results go. Created if needed; an unusable location is the
+	// user's to fix.
+	outputDir, err := filepath.Abs(cleanFlags["output-dir"][0])
+	if err != nil {
+		panic(fmt.Errorf("resolving absolute path for output dir: %w", err))
+	}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		fatalf("cannot create output dir %q: %v", outputDir, err)
 	}
 
-	_, cleanFlags := args.ValidateArgs("schedule", argsReceived, flagsReceived, argsRequested, flagsRequested)
-
-	// Required, repeatable: the site's entry points. Each opens in its own tab
-	// for the explorer, in order, and together they define the hosts it may
-	// roam. Each must be an absolute URL.
-	urls := cleanFlags["url"]
-	for _, raw := range urls {
-		if u, err := url.Parse(raw); err != nil || u.Scheme == "" || u.Host == "" {
-			fatalf("invalid --url %q (expected an absolute URL like https://example.com)", raw)
+	// The repository's config is the command's whole input. A missing or
+	// broken file is the user's to fix, so it is reported and exits 1 —
+	// Load already validates URLs, the app section and the version.
+	cfg, err := config.Load(".")
+	if err != nil {
+		if errors.Is(err, config.ErrNotFound) {
+			cwd, _ := os.Getwd()
+			fatalf("no %s found in %s (the schedule command runs from the root of the repository being audited, which must carry that file)", config.FileName, cwd)
 		}
+		fatalf("%v", err)
 	}
 
-	// Browser driver: playwright launches and drives its own Chromium;
-	// extension drives the user's normal Chrome through the bridge extension in
-	// test-chrome-extension/ — for sensitive sites whose bot prevention blocks
-	// automated browsers.
-	driver := flagValue(cleanFlags, "driver", "playwright")
-	switch driver {
-	case "playwright", "extension":
-	default:
-		fatalf("invalid --driver %q (expected: playwright, extension)", driver)
+	// The site's entry points. Each opens in its own tab for the explorer, in
+	// order, and together they define the hosts it may roam.
+	urls := cfg.Urls
+
+	// Budgets and the explorer's notes from the config's schedule section,
+	// defaulted where unset. An out-of-range budget is a config error.
+	var sched config.Schedule
+	if cfg.Schedule != nil {
+		sched = *cfg.Schedule
 	}
-	extensionPort, err := strconv.Atoi(flagValue(cleanFlags, "extension-port", "8377"))
-	if err != nil || extensionPort < 1 || extensionPort > 65535 {
-		fatalf("invalid --extension-port %q (expected a port number)", flagValue(cleanFlags, "extension-port", ""))
-	}
-
-	// Optional system prompt file, passed through to the claude CLI's
-	// --system-prompt-file for both agents. Resolved to an absolute path
-	// because the CLI runs from the agent dir, not the CWD this program was
-	// launched from.
-	systemPromptFile := flagValue(cleanFlags, "system-prompt-file", "")
-	if systemPromptFile != "" {
-		abs, err := filepath.Abs(expandTilde(systemPromptFile))
-		if err != nil {
-			panic(fmt.Errorf("resolving absolute path for system prompt file: %w", err))
-		}
-		if _, err := os.Stat(abs); err != nil {
-			fatalf("system prompt file %q not accessible: %v", abs, err)
-		}
-		systemPromptFile = abs
-	}
-
-	// Viewport size (WIDTHxHEIGHT, e.g. 1440x900).
-	viewport := flagValue(cleanFlags, "viewport", "1440x900")
-	viewportWidth, viewportHeight := parseViewport(viewport)
-
-	// Optional persistent browser profile dir.
-	userDataDir := flagValue(cleanFlags, "user-data-dir", "")
-
-	// Boolean flags: presence means true.
-	_, headed := cleanFlags["headed"]
-	_, noVideo := cleanFlags["no-video"]
-
-	// Budgets. Every turn is one claude call, so these bound the run's cost and
-	// duration: at most max-scenarios scenarios are performed (the explorer
-	// orders them by importance, so the tail is what gets cut), the explorer
-	// gets max-explore-turns to map the site, and each auditor conversation
-	// gets max-scenario-turns before the scenario is recorded as abandoned.
-	maxScenarios := intFlag(cleanFlags, "max-scenarios", 10, 1, 50)
-	maxExploreTurns := intFlag(cleanFlags, "max-explore-turns", 30, 1, 200)
-	maxScenarioTurns := intFlag(cleanFlags, "max-scenario-turns", 40, 1, 200)
-
-	// Optional notes for the explorer — what to concentrate on, test data or
-	// credentials to pass into the scenarios — as literal text (--prompt) or a
-	// file (--prompt-path); ValidateArgs enforces at most one of the two.
-	userFocus := flagValue(cleanFlags, "prompt", "")
-	if promptPath := flagValue(cleanFlags, "prompt-path", ""); promptPath != "" {
-		abs, err := filepath.Abs(expandTilde(promptPath))
-		if err != nil {
-			panic(fmt.Errorf("resolving absolute path for prompt file: %w", err))
-		}
-		b, err := os.ReadFile(abs)
-		if err != nil {
-			fatalf("prompt file %q not accessible: %v", abs, err)
-		}
-		userFocus = string(b)
-	}
-
-	// --scenarios-path skips the exploration and performs pre-written scenarios
-	// instead — a previous run's files/scenarios.json, typically, to re-audit
-	// the same journeys after fixes. The explorer-only flags are then
-	// meaningless, so they are rejected rather than silently ignored.
-	var scenarios []audit.Scenario
-	if scenariosPath := flagValue(cleanFlags, "scenarios-path", ""); scenariosPath != "" {
-		for _, f := range []string{"prompt", "prompt-path", "max-explore-turns"} {
-			if _, ok := cleanFlags[f]; ok {
-				fatalf("--%s is only valid without --scenarios-path (it steers the exploration, which --scenarios-path skips)", f)
-			}
-		}
-		abs, err := filepath.Abs(expandTilde(scenariosPath))
-		if err != nil {
-			panic(fmt.Errorf("resolving absolute path for scenarios file: %w", err))
-		}
-		b, err := os.ReadFile(abs)
-		if err != nil {
-			fatalf("scenarios file %q not accessible: %v", abs, err)
-		}
-		if err := json.Unmarshal(b, &scenarios); err != nil {
-			fatalf("scenarios file %q is not a JSON array of scenarios: %v", abs, err)
-		}
-		scenarios = normalizeScenarios(scenarios, urls, maxScenarios)
-		if len(scenarios) == 0 {
-			fatalf("scenarios file %q contains no usable scenario (each needs a title and at least one step)", abs)
-		}
-	}
+	maxScenarios := budget("schedule.maxScenarios", sched.MaxScenarios, defaultMaxScenarios, maxMaxScenarios)
+	maxExploreTurns := budget("schedule.maxExploreTurns", sched.MaxExploreTurns, defaultMaxExploreTurns, maxTurns)
+	maxScenarioTurns := budget("schedule.maxScenarioTurns", sched.MaxScenarioTurns, defaultMaxScenarioTurns, maxTurns)
+	userFocus := sched.Prompt
 
 	// Per-run temp dir holds the frames, the agents' working dir, and debug dumps.
-	tmpDir, err := os.MkdirTemp("", "ai-browser-connector-*")
+	tmpDir, err := os.MkdirTemp("", "axeq-*")
 	if err != nil {
 		panic(fmt.Errorf("creating temp dir: %w", err))
 	}
 	fmt.Printf("Temp dir: %s\n", tmpDir)
 
-	// Everything the audit produces lands under one CWD-relative, per-run
-	// folder: outputs/{run}/files for the scenarios and the report,
-	// outputs/{run}/screenshots for evidence, outputs/{run}/recordings for the
+	// Bring the application under test up, when the config says how. It runs
+	// for the whole audit and is torn down with the browser. Its output goes
+	// to its own log so it doesn't tangle with the audit's. A setup command
+	// failing or the server never answering is the repository's problem, not
+	// ours, so it is reported rather than panicked.
+	if cfg.App != nil {
+		cwd, err := os.Getwd()
+		if err != nil {
+			panic(fmt.Errorf("resolving working directory: %w", err))
+		}
+		appLog := filepath.Join(tmpDir, "app.log")
+		fmt.Printf("App log: %s\n", appLog)
+		proc, err := app.Start(*cfg.App, cwd, config.ReadyUrl(cfg), appLog)
+		if err != nil {
+			fatalf("%v", err)
+		}
+		defer app.Stop(proc)
+	}
+
+	// Everything the audit produces lands under the output dir: files/ for the
+	// scenarios and the report, screenshots/ for evidence, recordings/ for the
 	// videos. Siblings, so the markdown report links them as ../screenshots/…
-	// and ../recordings/…. Each is created lazily on first use. Both backends
-	// resolve screenshot names against their own copy of the setting.
-	runOutDir := filepath.Join("outputs", filepath.Base(tmpDir))
+	// and ../recordings/…. Each is created lazily on first use.
+	runOutDir := outputDir
 	screenshotsOutDir := filepath.Join(runOutDir, "screenshots")
 	browser.SetScreenshotOutputDir(screenshotsOutDir)
-	extension.SetScreenshotOutputDir(screenshotsOutDir)
 	fmt.Printf("Screenshots dir: %s\n", screenshotsOutDir)
 
 	filesOutDir := filepath.Join(runOutDir, "files")
 	fmt.Printf("Files dir: %s\n", filesOutDir)
 
 	recordingsOutDir := filepath.Join(runOutDir, "recordings")
-	if !noVideo {
-		fmt.Printf("Recordings dir: %s\n", recordingsOutDir)
-	}
+	fmt.Printf("Recordings dir: %s\n", recordingsOutDir)
 
 	// Every claude call dumps its settings, prompt, and output here for
 	// debugging, timestamp-prefixed so ls lists them chronologically.
@@ -224,66 +178,24 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 		panic(fmt.Errorf("creating agent dir: %w", err))
 	}
 
-	// The chosen driver supplies the audit's browser operations. Both expose
-	// the same free-function surface over the same action types, so the agents
-	// drive either one identically.
-	var be backend
-	if driver == "extension" {
-		// The extension drives the user's real Chrome: viewport, headedness, and
-		// profile belong to that browser, and video recording (15fps screenshot
-		// sampling) exceeds captureVisibleTab's rate limit.
-		for _, f := range []string{"viewport", "headed", "user-data-dir"} {
-			if _, ok := cleanFlags[f]; ok {
-				fmt.Printf("note: --%s is ignored with --driver extension (the user's own Chrome is driven)\n", f)
-			}
-		}
-		if !noVideo {
-			fmt.Println("note: --driver extension cannot record video; continuing without recording")
-			noVideo = true
-		}
+	// Headless Chromium with a fresh profile in the temp dir.
+	userDataDir := filepath.Join(tmpDir, "user-data")
+	if err := browser.Prepare(filepath.Join(tmpDir, "playwright"), userDataDir, viewportWidth, viewportHeight, true); err != nil {
+		panic(fmt.Errorf("preparing browser: %w", err))
+	}
+	defer browser.Teardown()
 
-		if err := extension.Prepare(extensionPort); err != nil {
-			panic(fmt.Errorf("preparing extension bridge: %w", err))
-		}
-		defer extension.Teardown()
-
-		fmt.Printf("Extension bridge listening on http://127.0.0.1:%d\n", extensionPort)
-		fmt.Println("Waiting for the extension: load test-chrome-extension/ at chrome://extensions, enable it in its popup, and adopt the tab to drive.")
-		if err := extension.WaitForExtension(5 * time.Minute); err != nil {
-			fatalf("%v", err)
-		}
-		fmt.Println("Extension connected.")
-
-		be = backend{
-			openInitialTabs: extension.OpenInitialTabs,
-			waitForLoad:     extension.WaitForLoad,
-			performActions:  extension.PerformActions,
-			snapshot:        extension.Snapshot,
-			focused:         extension.Focused,
-			tabs:            extension.Tabs,
-		}
-	} else {
-		// Persistent browser profile: default into the temp dir when not specified.
-		if userDataDir == "" {
-			userDataDir = filepath.Join(tmpDir, "user-data")
-		}
-		fmt.Printf("Browser profile: %s\n", userDataDir)
-
-		if err := browser.Prepare(filepath.Join(tmpDir, "playwright"), userDataDir, viewportWidth, viewportHeight, !headed); err != nil {
-			panic(fmt.Errorf("preparing browser: %w", err))
-		}
-		defer browser.Teardown()
-
-		be = backend{
-			openInitialTabs: browser.OpenInitialTabs,
-			waitForLoad:     browser.WaitForLoad,
-			performActions:  browser.PerformActions,
-			snapshot:        browser.Snapshot,
-			focused:         browser.Focused,
-			tabs:            browser.Tabs,
-		}
+	be := backend{
+		openInitialTabs: browser.OpenInitialTabs,
+		waitForLoad:     browser.WaitForLoad,
+		performActions:  browser.PerformActions,
+		snapshot:        browser.Snapshot,
+		focused:         browser.Focused,
+		tabs:            browser.Tabs,
 	}
 
+	// The URLs were validated by the config loader and the app reported ready,
+	// so a tab that still won't open is an environment fault.
 	if err := be.openInitialTabs(urls); err != nil {
 		panic(fmt.Errorf("opening initial tabs: %w", err))
 	}
@@ -293,28 +205,26 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 
 	report := audit.Report{Urls: urls, StartedAt: time.Now()}
 
-	// Phase 1 — exploration. Skipped when scenarios came from --scenarios-path.
-	// The explorer's whole conversation is one recording.
-	if scenarios == nil {
-		fmt.Printf("\n=== Exploring %s (up to %d turns) ===\n", strings.Join(urls, ", "), maxExploreTurns)
-		code := recorded(!noVideo, filepath.Join(tmpDir, "frames", "exploration"), filepath.Join(recordingsOutDir, "exploration.mp4"), func(rec *browser.Recorder) int {
-			var c int
-			scenarios, c = explore(be, agentDir, urls, userFocus, systemPromptFile, maxExploreTurns, rec)
-			return c
-		})
-		if code != 0 {
-			return code
-		}
-		scenarios = normalizeScenarios(scenarios, urls, maxScenarios)
-		if len(scenarios) == 0 {
-			fmt.Fprintln(os.Stderr, "the explorer returned no usable scenario (each needs a title and at least one step)")
-			return 1
-		}
+	// Phase 1 — exploration. The explorer's whole conversation is one recording.
+	var scenarios []audit.Scenario
+	fmt.Printf("\n=== Exploring %s (up to %d turns) ===\n", strings.Join(urls, ", "), maxExploreTurns)
+	code := recorded(filepath.Join(tmpDir, "frames", "exploration"), filepath.Join(recordingsOutDir, "exploration.mp4"), func(rec *browser.Recorder) int {
+		var c int
+		scenarios, c = explore(be, agentDir, urls, userFocus, maxExploreTurns, rec)
+		return c
+	})
+	if code != 0 {
+		return code
+	}
+	scenarios = normalizeScenarios(scenarios, urls, maxScenarios)
+	if len(scenarios) == 0 {
+		fmt.Fprintln(os.Stderr, "the explorer returned no usable scenario (each needs a title and at least one step)")
+		return 1
 	}
 	report.Scenarios = scenarios
 
 	// The scenario list is a deliverable in its own right: it documents what
-	// was audited and feeds --scenarios-path on a re-run.
+	// was audited.
 	scenariosPath := filepath.Join(filesOutDir, "scenarios.json")
 	writeJSON(scenariosPath, scenarios)
 	fmt.Printf("\nScenarios (%d): %s\n", len(scenarios), scenariosPath)
@@ -331,9 +241,9 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 
 		var result audit.ScenarioResult
 		recordingPath := filepath.Join(recordingsOutDir, name+".mp4")
-		code := recorded(!noVideo, filepath.Join(tmpDir, "frames", name), recordingPath, func(rec *browser.Recorder) int {
+		code := recorded(filepath.Join(tmpDir, "frames", name), recordingPath, func(rec *browser.Recorder) int {
 			var c int
-			result, c = runScenario(be, agentDir, name, sc, systemPromptFile, maxScenarioTurns, rec)
+			result, c = runScenario(be, agentDir, name, sc, maxScenarioTurns, rec)
 			return c
 		})
 		if _, err := os.Stat(recordingPath); err == nil {
@@ -352,11 +262,24 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 	return 0
 }
 
+// budget resolves one of the config's turn/scenario budgets: def when the
+// value is unset (zero), else the value, which must lie within [1, max] — a
+// config error otherwise. name is the config key, for the message.
+func budget(name string, v, def, max int) int {
+	if v == 0 {
+		return def
+	}
+	if v < 1 || v > max {
+		fatalf("%s: %q is %d (expected a number between 1 and %d)", config.FileName, name, v, max)
+	}
+	return v
+}
+
 // explore runs the explorer's conversation to completion and returns the
 // scenarios it produced. It returns a non-zero exit code instead when the
 // explorer was interrupted (130) or failed to deliver scenarios within its
 // turn budget (1).
-func explore(be backend, agentDir string, urls []string, userFocus, systemPromptFile string, maxTurns int, rec *browser.Recorder) ([]audit.Scenario, int) {
+func explore(be backend, agentDir string, urls []string, userFocus string, maxTurns int, rec *browser.Recorder) ([]audit.Scenario, int) {
 	// First turn: capture the landing-page state (screenshot + DOM — the
 	// explorer is sighted), then kick off the conversation.
 	shotPath, domPath, err := be.snapshot(agentDir)
@@ -366,7 +289,7 @@ func explore(be backend, agentDir string, urls []string, userFocus, systemPrompt
 
 	turn := 1
 	rec.Pause()
-	convoId, resp, err := audit.ExploreInitial(agentDir, systemPromptFile, urls, userFocus, shotPath, domPath, be.tabs(), maxTurns)
+	convoId, resp, err := audit.ExploreInitial(agentDir, "", urls, userFocus, shotPath, domPath, be.tabs(), maxTurns)
 	rec.Resume()
 	if code := agentFailure(err); code != 0 {
 		return nil, code
@@ -393,7 +316,7 @@ func explore(be backend, agentDir string, urls []string, userFocus, systemPrompt
 
 		turn++
 		rec.Pause()
-		resp, err = audit.ExploreSubsequent(convoId, agentDir, performed, systemPromptFile, shotPath, domPath, be.tabs(), maxTurns-turn+1)
+		resp, err = audit.ExploreSubsequent(convoId, agentDir, performed, "", shotPath, domPath, be.tabs(), maxTurns-turn+1)
 		rec.Resume()
 		if code := agentFailure(err); code != 0 {
 			return nil, code
@@ -412,7 +335,7 @@ func explore(be backend, agentDir string, urls []string, userFocus, systemPrompt
 // interruption — with exit code 130 — so the report can include what was
 // observed so far. name is the run-local file-name stem for this scenario's
 // evidence screenshots and recording.
-func runScenario(be backend, agentDir, name string, sc audit.Scenario, systemPromptFile string, maxTurns int, rec *browser.Recorder) (audit.ScenarioResult, int) {
+func runScenario(be backend, agentDir, name string, sc audit.Scenario, maxTurns int, rec *browser.Recorder) (audit.ScenarioResult, int) {
 	result := audit.ScenarioResult{Scenario: sc, Outcome: audit.OutcomeAbandoned, Findings: []audit.Finding{}}
 
 	// A scenario whose start page won't open is the explorer's mistake, not a
@@ -432,7 +355,7 @@ func runScenario(be backend, agentDir, name string, sc audit.Scenario, systemPro
 
 	turn := 1
 	rec.Pause()
-	convoId, resp, err := audit.AuditInitial(agentDir, systemPromptFile, sc, focused, be.tabs(), maxTurns)
+	convoId, resp, err := audit.AuditInitial(agentDir, "", sc, focused, be.tabs(), maxTurns)
 	rec.Resume()
 	if code := agentFailure(err); code != 0 {
 		result.Summary = "Interrupted before the auditor's first turn completed."
@@ -469,7 +392,7 @@ func runScenario(be backend, agentDir, name string, sc audit.Scenario, systemPro
 
 		turn++
 		rec.Pause()
-		resp, err = audit.AuditSubsequent(convoId, agentDir, performed, systemPromptFile, focused, be.tabs(), maxTurns-turn+1)
+		resp, err = audit.AuditSubsequent(convoId, agentDir, performed, "", focused, be.tabs(), maxTurns-turn+1)
 		rec.Resume()
 		if code := agentFailure(err); code != 0 {
 			result.Turns = turn
@@ -542,13 +465,8 @@ func resetBrowser(be backend, startUrl string) string {
 // under its own constant-rate frame recording into framesDir, encoded to
 // outPath once the phase returns, so each phase gets its own video. The phase
 // pauses the recorder while waiting on the agent so those gaps don't appear
-// in the output. With recording disabled the phase runs with a nil recorder,
-// whose Pause/Resume no-op.
-func recorded(enabled bool, framesDir, outPath string, phase func(rec *browser.Recorder) int) int {
-	if !enabled {
-		return phase(nil)
-	}
-
+// in the output.
+func recorded(framesDir, outPath string, phase func(rec *browser.Recorder) int) int {
 	rec, err := browser.StartRecording(framesDir, framesFPS)
 	if err != nil {
 		panic(fmt.Errorf("starting recorder: %w", err))
@@ -658,60 +576,6 @@ func activeUrl(tabs []browser.Tab) string {
 		}
 	}
 	return ""
-}
-
-// expandTilde resolves a leading "~" or "~/" to the user's home directory —
-// the shell doesn't expand it when the path was quoted.
-func expandTilde(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			panic(fmt.Errorf("resolving home directory: %w", err))
-		}
-		return filepath.Join(home, p[1:])
-	}
-	return p
-}
-
-// flagValue returns the single value of a validated flag, or def when the flag
-// was not provided.
-func flagValue(flags map[string][]string, name, def string) string {
-	if v, ok := flags[name]; ok && len(v) > 0 {
-		return v[0]
-	}
-	return def
-}
-
-// intFlag returns the single value of a validated flag as an integer within
-// [min, max], or def when the flag was not provided.
-func intFlag(flags map[string][]string, name string, def, min, max int) int {
-	raw, ok := flags[name]
-	if !ok || len(raw) == 0 {
-		return def
-	}
-	n, err := strconv.Atoi(raw[0])
-	if err != nil || n < min || n > max {
-		fatalf("invalid --%s %q (expected a number between %d and %d)", name, raw[0], min, max)
-	}
-	return n
-}
-
-// parseViewport parses a WIDTHxHEIGHT string (case-insensitive x), e.g. 1440x900.
-func parseViewport(s string) (int, int) {
-	parts := strings.Split(strings.ToLower(s), "x")
-	if len(parts) != 2 {
-		fatalf("invalid --viewport %q (expected WIDTHxHEIGHT, e.g. 1440x900)", s)
-	}
-
-	width, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil || width <= 0 {
-		fatalf("invalid --viewport width in %q (expected WIDTHxHEIGHT, e.g. 1440x900)", s)
-	}
-	height, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if err != nil || height <= 0 {
-		fatalf("invalid --viewport height in %q (expected WIDTHxHEIGHT, e.g. 1440x900)", s)
-	}
-	return width, height
 }
 
 // fatalf reports a user-caused error (bad input, unusable file, ...) to stderr

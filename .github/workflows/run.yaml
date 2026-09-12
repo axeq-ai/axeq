@@ -191,9 +191,9 @@ jobs:
           token: ${{ steps.token.outputs.installation-token }}
           persist-credentials: false
 
-      - name: Sleep
+      - name: Create output dir
         shell: bash
-        run: sleep 30
+        run: mkdir -p "$RUNNER_TEMP/axeq-output"
 
       - name: Run axeq
         shell: bash
@@ -209,5 +209,15 @@ jobs:
           if [[ -n "$TRIGGER_DATA" ]]; then
             args+=("$TRIGGER_DATA")
           fi
+          args+=(--output-dir "$RUNNER_TEMP/axeq-output")
 
           "$RUNNER_TEMP/axeq" "${args[@]}"
+
+      - name: Upload output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: axeq-output
+          path: ${{ runner.temp }}/axeq-output
+          if-no-files-found: warn
+          retention-days: 30
