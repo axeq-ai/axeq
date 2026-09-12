@@ -118,3 +118,39 @@ func TestSchemasEncodePersonas(t *testing.T) {
 		t.Error("auditor schema must not allow selector targeting")
 	}
 }
+
+func TestPlannerPromptRenders(t *testing.T) {
+	pr := PullRequest{Number: 7, Title: "Add cart drawer", Body: "Slide-out cart.", Url: "https://github.com/o/r/pull/7", HeadRef: "feat/cart", BaseRef: "main", ChangedFiles: []string{"src/Cart.jsx"}, Diff: "diff --git a/src/Cart.jsx b/src/Cart.jsx\n", Notes: []string{"1 file(s) left out"}}
+	_, err := prompt.RenderStrict(plannerPrompt, map[string]prompt.Param{
+		"repo_dir":         prompt.Text("/work/repo"),
+		"pull_request":     prompt.Text(renderPullRequest(pr)),
+		"changed_files":    prompt.Text(renderChangedFiles(pr)),
+		"diff":             prompt.Text(pr.Diff),
+		"site_scope":       prompt.Text(renderScope([]string{"https://example.com/"})),
+		"user_focus":       prompt.Text(renderUserFocus("")),
+		"max_scenarios":    prompt.Text("10"),
+		"scenario_example": prompt.JSON(exampleScenario),
+		"json_schema":      prompt.JSON(json.RawMessage(plannerSchema)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFilterPromptRenders(t *testing.T) {
+	pr := PullRequest{Number: 7, Title: "Add cart drawer"}
+	results := []ScenarioResult{{Scenario: exampleScenario, Outcome: OutcomeBlocked, Findings: []Finding{{Hindrance: Hindrance{Step: 1, Severity: "critical", Category: "missing-name", Description: "d", Recommendation: "r"}}}}}
+	_, err := prompt.RenderStrict(filterPrompt, map[string]prompt.Param{
+		"repo_dir":     prompt.Text("/work/repo"),
+		"pull_request": prompt.Text(renderPullRequest(pr)),
+		"diff":         prompt.Text(""),
+		"results":      prompt.JSON(filterView(results)),
+		"json_schema":  prompt.JSON(json.RawMessage(filterSchema)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := filterView(results); v[0].Findings[0].Finding != 1 {
+		t.Errorf("finding positions should be 1-based, got %d", v[0].Findings[0].Finding)
+	}
+}

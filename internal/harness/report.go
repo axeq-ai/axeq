@@ -1,4 +1,4 @@
-package schedule
+package harness
 
 import (
 	"axeq/internal/claude/audit"
@@ -17,25 +17,25 @@ var severityRank = map[string]int{"critical": 0, "serious": 1, "moderate": 2, "m
 
 var severities = []string{"critical", "serious", "moderate", "minor"}
 
-// writeReport writes the run's results into filesOutDir as audit.json (the
+// WriteReport writes the run's results into filesOutDir as audit.json (the
 // full record, for tooling) and audit.md (the human-readable report), and
 // returns both paths. Links in the markdown are relative to files/, so the
 // evidence screenshots and recordings — siblings of it under the run folder —
 // are reached via ../.
-func writeReport(filesOutDir string, report audit.Report) (jsonPath, mdPath string) {
+func WriteReport(filesOutDir string, report audit.Report) (jsonPath, mdPath string) {
 	jsonPath = filepath.Join(filesOutDir, "audit.json")
-	writeJSON(jsonPath, report)
+	WriteJSON(jsonPath, report)
 
 	mdPath = filepath.Join(filesOutDir, "audit.md")
-	if err := os.WriteFile(mdPath, []byte(renderMarkdown(report)), 0o644); err != nil {
+	if err := os.WriteFile(mdPath, []byte(RenderMarkdown(report)), 0o644); err != nil {
 		panic(fmt.Errorf("writing report %s: %w", mdPath, err))
 	}
 	return jsonPath, mdPath
 }
 
-// writeJSON writes v as indented JSON to path, creating the parent dir as
+// WriteJSON writes v as indented JSON to path, creating the parent dir as
 // needed.
-func writeJSON(path string, v any) {
+func WriteJSON(path string, v any) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		panic(fmt.Errorf("creating dir for %s: %w", path, err))
 	}
@@ -48,16 +48,23 @@ func writeJSON(path string, v any) {
 	}
 }
 
-// renderMarkdown renders the report: a header describing the run, a summary
+// RenderMarkdown renders the report: a header describing the run, a summary
 // table (one row per scenario with its outcome and hindrance counts by
 // severity), every finding worst-first, and then each scenario in full — its
 // steps, outcome, hindrances with evidence, recording, and the auditor's
 // turn-by-turn transcript.
-func renderMarkdown(r audit.Report) string {
+func RenderMarkdown(r audit.Report) string {
 	var b strings.Builder
 
-	fmt.Fprintf(&b, "# Accessibility audit: %s\n\n", strings.Join(hostsOf(r.Urls), ", "))
+	title := r.Title
+	if title == "" {
+		title = "Accessibility audit: " + strings.Join(hostsOf(r.Urls), ", ")
+	}
+	fmt.Fprintf(&b, "# %s\n\n", title)
 
+	for _, note := range r.Notes {
+		b.WriteString("- " + note + "\n")
+	}
 	b.WriteString("- **Audited:** " + strings.Join(r.Urls, ", ") + "\n")
 	b.WriteString("- **Persona:** blind screen-reader user, keyboard only (perceives only the focused element and tab titles)\n")
 	fmt.Fprintf(&b, "- **Run:** %s to %s\n", r.StartedAt.Format("2006-01-02 15:04"), r.FinishedAt.Format("2006-01-02 15:04"))

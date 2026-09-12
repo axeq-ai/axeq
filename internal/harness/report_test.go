@@ -1,4 +1,4 @@
-package schedule
+package harness
 
 import (
 	"strings"
@@ -17,7 +17,7 @@ func TestRenderMarkdownCoversEverySection(t *testing.T) {
 		SuccessCriteria: "The tab title mentions Pricing.", Focus: []string{"menu"},
 	}
 	r := audit.Report{
-		Urls: []string{"https://example.com/"},
+		Urls:      []string{"https://example.com/"},
 		StartedAt: time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC), FinishedAt: time.Date(2026, 9, 12, 10, 30, 0, 0, time.UTC),
 		Partial:   true,
 		Scenarios: []audit.Scenario{sc, {ID: "later", Title: "Never reached", StartUrl: "https://example.com/x", Steps: []string{"a"}}},
@@ -32,7 +32,7 @@ func TestRenderMarkdownCoversEverySection(t *testing.T) {
 		}},
 	}
 
-	md := renderMarkdown(r)
+	md := RenderMarkdown(r)
 	for _, want := range []string{
 		"# Accessibility audit: example.com",
 		"**Partial:** the run was interrupted after 1 of 2 planned scenarios",
@@ -62,7 +62,7 @@ func TestNormalizeScenarios(t *testing.T) {
 		{ID: "e", Title: "Cut by max", StartUrl: "https://example.com/e", Steps: []string{"x"}},
 	}
 
-	out := normalizeScenarios(in, urls, 2)
+	out := NormalizeScenarios(in, urls, 2)
 	if len(out) != 2 {
 		t.Fatalf("want 2 scenarios, got %d: %+v", len(out), out)
 	}

@@ -57,7 +57,7 @@ var auditorExcludedDataFields = []string{"selector"}
 // The schemas are built once at startup; a broken schema is a programming
 // error (a struct/tag/table mismatch), so init panics rather than letting runs
 // proceed with a silently wrong schema.
-var explorerSchema, auditorSchema string
+var explorerSchema, auditorSchema, plannerSchema, filterSchema string
 
 func init() {
 	var err error
@@ -66,6 +66,12 @@ func init() {
 	}
 	if auditorSchema, err = buildAuditorSchema(); err != nil {
 		panic(fmt.Sprintf("building auditor schema: %v", err))
+	}
+	if plannerSchema, err = buildPlannerSchema(); err != nil {
+		panic(fmt.Sprintf("building planner schema: %v", err))
+	}
+	if filterSchema, err = buildFilterSchema(); err != nil {
+		panic(fmt.Sprintf("building filter schema: %v", err))
 	}
 }
 
@@ -180,6 +186,83 @@ func buildAuditorSchema() (string, error) {
 			},
 		},
 		"required": []string{"scenarioComplete"},
+	}
+
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// buildPlannerSchema is the PlannerResponse schema: a summary, the Scenario
+// list (generated from the Scenario struct, as for the explorer), and the
+// changes left uncovered. No actions — the planner has no browser.
+func buildPlannerSchema() (string, error) {
+	scenario, err := jsonschema.FromType(Scenario{})
+	if err != nil {
+		return "", err
+	}
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{
+				"type":        "string",
+				"description": "one paragraph: what the pull request changes in the user interface",
+			},
+			"scenarios": map[string]any{
+				"type":        "array",
+				"items":       scenario,
+				"description": "ordered from the change most likely to affect a screen-reader user to the least",
+			},
+			"notCovered": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "changes no scenario exercises, each with the reason",
+			},
+		},
+		"required": []string{"summary", "scenarios"},
+	}
+
+	b, err := json.Marshal(schema)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// buildFilterSchema is the FilterResponse schema: a summary plus one verdict
+// per scenario and per finding, generated from the verdict structs.
+func buildFilterSchema() (string, error) {
+	scenarioVerdict, err := jsonschema.FromType(ScenarioVerdict{})
+	if err != nil {
+		return "", err
+	}
+	findingVerdict, err := jsonschema.FromType(FindingVerdict{})
+	if err != nil {
+		return "", err
+	}
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{
+				"type":        "string",
+				"description": "one paragraph: what was kept as related to the pull request and what was set aside as pre-existing",
+			},
+			"scenarios": map[string]any{
+				"type":        "array",
+				"items":       scenarioVerdict,
+				"description": "exactly one verdict per performed scenario",
+			},
+			"findings": map[string]any{
+				"type":        "array",
+				"items":       findingVerdict,
+				"description": "exactly one verdict per finding across all scenarios",
+			},
+		},
+		"required": []string{"summary", "scenarios", "findings"},
 	}
 
 	b, err := json.Marshal(schema)

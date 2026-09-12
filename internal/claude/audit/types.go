@@ -110,10 +110,56 @@ type ScenarioResult struct {
 // and the result of each one performed. Partial is true when the run stopped
 // (interrupted) before every planned scenario was performed.
 type Report struct {
+	// Title and Notes let a command frame the report: the heading (default:
+	// "Accessibility audit: <hosts>") and extra header lines, e.g. the pull
+	// request under review.
+	Title      string           `json:"title,omitempty"`
+	Notes      []string         `json:"notes,omitempty"`
 	Urls       []string         `json:"urls"`
 	StartedAt  time.Time        `json:"startedAt"`
 	FinishedAt time.Time        `json:"finishedAt"`
 	Partial    bool             `json:"partial"`
 	Scenarios  []Scenario       `json:"scenarios"`
 	Results    []ScenarioResult `json:"results"`
+}
+
+// PlannerResponse is the structured output of the pull_request command's
+// planner: the scenarios that exercise what a pull request changed. Unlike the
+// explorer it has no browser — it reads the diff and the repository — so it
+// answers in one turn.
+type PlannerResponse struct {
+	// Summary is the planner's one-paragraph reading of what the pull request
+	// changes in the interface, for the report.
+	Summary   string     `json:"summary"`
+	Scenarios []Scenario `json:"scenarios"`
+	// NotCovered lists changes no scenario exercises and why — backend-only
+	// code, pages outside the configured URLs, changes with no user-facing
+	// effect — so the reader knows what the audit did not look at.
+	NotCovered []string `json:"notCovered,omitempty"`
+}
+
+// ScenarioVerdict is the filter's ruling on one performed scenario: whether
+// the journey it exercises is affected by the pull request at all.
+type ScenarioVerdict struct {
+	ID      string `json:"id" description:"the scenario's id"`
+	Related bool   `json:"related" description:"true when the pull request's changes affect what this scenario exercises"`
+	Reason  string `json:"reason" description:"one sentence: which change relates it, or why it is unrelated"`
+}
+
+// FindingVerdict is the filter's ruling on one finding: whether the hindrance
+// was caused, changed, or left in place by the pull request's changes.
+type FindingVerdict struct {
+	ScenarioID string `json:"scenarioId" description:"id of the scenario the finding belongs to"`
+	Finding    int    `json:"finding" description:"1-based position of the finding in that scenario's findings list"`
+	Related    bool   `json:"related" description:"true when the pull request introduced, altered, or touched the code behind this hindrance"`
+	Reason     string `json:"reason" description:"one sentence naming the changed file or hunk, or why the hindrance is pre-existing"`
+}
+
+// FilterResponse is the structured output of the pull_request command's
+// filter: verdicts, not a rewritten report — the orchestrator applies them.
+type FilterResponse struct {
+	// Summary is the filter's one-paragraph account of what it kept and cut.
+	Summary   string            `json:"summary"`
+	Scenarios []ScenarioVerdict `json:"scenarios"`
+	Findings  []FindingVerdict  `json:"findings"`
 }

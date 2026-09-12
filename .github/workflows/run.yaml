@@ -184,10 +184,13 @@ jobs:
           echo "installation-token=$token" >> "$GITHUB_OUTPUT"
           echo "Token expires at: $(jq -r '.expires_at' <<< "$response")"
 
+      # A pull_request trigger audits the pull request's head; trigger-data is
+      # its number. Other triggers audit the default branch (empty ref).
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.repository-owner }}/${{ inputs.repository-name }}
+          ref: ${{ inputs.trigger-type == 'pull_request' && format('refs/pull/{0}/head', inputs.trigger-data) || '' }}
           token: ${{ steps.token.outputs.installation-token }}
           persist-credentials: false
 
@@ -200,6 +203,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.installation-token }}
+          REPOSITORY: ${{ inputs.repository-owner }}/${{ inputs.repository-name }}
           TRIGGER_TYPE: ${{ inputs.trigger-type }}
           TRIGGER_DATA: ${{ inputs.trigger-data }}
         run: |
@@ -210,6 +215,9 @@ jobs:
             args+=("$TRIGGER_DATA")
           fi
           args+=(--output-dir "$RUNNER_TEMP/axeq-output")
+          if [[ "$TRIGGER_TYPE" == "pull_request" ]]; then
+            args+=(--repository "$REPOSITORY")
+          fi
 
           "$RUNNER_TEMP/axeq" "${args[@]}"
 
