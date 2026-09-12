@@ -31,11 +31,17 @@ const (
 // and the bounds a configured value must fall within. Every turn is one
 // claude call, so these bound the run's cost and duration.
 const (
-	defaultMaxScenarios     = 10
-	defaultMaxExploreTurns  = 30
-	defaultMaxScenarioTurns = 40
-	maxMaxScenarios         = 50
-	maxTurns                = 200
+	defaultMaxScenarios = 10
+	maxMaxScenarios     = 50
+)
+
+// Turn budgets (the explorer's, and each scenario's) are handled more
+// leniently than the scenario count: a configured value is clamped rather
+// than rejected, and a low one only draws a warning. See turns.
+const (
+	defaultTurns    = 15
+	minAdvisedTurns = 5
+	maxTurnsCap     = 25
 )
 
 // backend is the browser-automation surface the audit drives, filled with
@@ -120,8 +126,8 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 		sched = *cfg.Schedule
 	}
 	maxScenarios := budget("schedule.maxScenarios", sched.MaxScenarios, defaultMaxScenarios, maxMaxScenarios)
-	maxExploreTurns := budget("schedule.maxExploreTurns", sched.MaxExploreTurns, defaultMaxExploreTurns, maxTurns)
-	maxScenarioTurns := budget("schedule.maxScenarioTurns", sched.MaxScenarioTurns, defaultMaxScenarioTurns, maxTurns)
+	maxExploreTurns := turns("schedule.maxExploreTurns", sched.MaxExploreTurns)
+	maxScenarioTurns := turns("schedule.maxScenarioTurns", sched.MaxScenarioTurns)
 	userFocus := sched.Prompt
 
 	// Per-run temp dir holds the frames, the agents' working dir, and debug dumps.
@@ -262,6 +268,23 @@ func run(argsReceived []string, flagsReceived map[string][]string) int {
 	return 0
 }
 
+// turns resolves one of the config's turn budgets (name is the config key):
+// unset or below 1 falls back to the default, anything above the cap is
+// clamped to it, and a value below the advised minimum is accepted with a
+// warning — an agent needs a few turns just to orient itself on a page.
+func turns(name string, v int) int {
+	switch {
+	case v < 1:
+		return defaultTurns
+	case v > maxTurnsCap:
+		fmt.Printf("note: %s: %q is %d, above the maximum of %d; using %d\n", config.FileName, name, v, maxTurnsCap, maxTurnsCap)
+		return maxTurnsCap
+	case v < minAdvisedTurns:
+		fmt.Printf("warning: %s: %q is %d. Using a turns value lower than %d may lead to inconsistent results, we recommend a value between 10 and 20.\n", config.FileName, name, v, minAdvisedTurns)
+	}
+	return v
+}
+
 // budget resolves one of the config's turn/scenario budgets: def when the
 // value is unset (zero), else the value, which must lie within [1, max] — a
 // config error otherwise. name is the config key, for the message.
@@ -303,7 +326,7 @@ func explore(be backend, agentDir string, urls []string, userFocus string, maxTu
 		// hasn't finished won't on its own, and there is nothing to audit without
 		// scenarios.
 		if turn >= maxTurns {
-			fmt.Fprintf(os.Stderr, "the explorer did not return scenarios within %d turns (raise --max-explore-turns)\n", maxTurns)
+			fmt.Fprintf(os.Stderr, "the explorer did not return scenarios within %d turns (raise \"schedule.maxExploreTurns\" in %s, up to %d)\n", maxTurns, config.FileName, maxTurnsCap)
 			return nil, 1
 		}
 
