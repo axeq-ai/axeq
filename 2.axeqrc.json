@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "app": {
+    "start": "python3 -m http.server 4321 --bind 127.0.0.1",
+    "readyUrl": "http://127.0.0.1:4321/storefront/",
+    "readyTimeoutSeconds": 30
+  },
+  "urls": [
+    "http://127.0.0.1:4321/storefront/",
+    "http://127.0.0.1:4321/fixtures/"
+  ],
+  "schedule": {
+    "prompt": "Two React targets with no build step. /storefront/ is 'Fernweh', a realistic outdoor clothing store landing page with a hero carousel, product filters, a slide-out cart and a newsletter form; treat it as the primary target. /fixtures/ is a set of 22 isolated broken components, one per hash route #/<case-id>; the list is on window.__A11Y_FIXTURES__.",
+    "maxScenarios": 10,
+    "maxExploreTurns": 30,
+    "maxScenarioTurns": 40
+  }
+}

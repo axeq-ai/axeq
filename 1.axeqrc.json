@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "app": {
+    "setup": ["npm ci"],
+    "start": "npm run dev -- --host 127.0.0.1 --port 5173 --strictPort",
+    "readyUrl": "http://127.0.0.1:5173/",
+    "readyTimeoutSeconds": 120
+  },
+  "urls": [
+    "http://127.0.0.1:5173/",
+    "http://127.0.0.1:5173/accessible.html"
+  ],
+  "schedule": {
+    "prompt": "Northstar is a team workspace app. index.html is the app under test; accessible.html is the accessible reference implementation of the same screens and is not a target, but you may open it to understand the intended behaviour.",
+    "maxScenarios": 10,
+    "maxExploreTurns": 30,
+    "maxScenarioTurns": 40
+  }
+}
